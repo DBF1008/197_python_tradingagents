@@ -25,7 +25,6 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
     build_analyst_execution_plan,
-    get_initial_analyst_node,
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -876,12 +875,18 @@ def update_analyst_statuses(message_buffer, chunk, wall_time_tracker=None):
     - Store new report content from the current chunk if present
     - Check accumulated report_sections (not just current chunk) for status
     - Analysts with reports = completed
-    - First analyst without report = in_progress
+    - The first concurrency_limit analysts without reports = in_progress
+      (only one is active in serial mode; several when running concurrently)
     - Remaining analysts without reports = pending
     - When all analysts done, set Bull Researcher to in_progress
     """
     selected = message_buffer.selected_analysts
-    found_active = False
+    concurrency = (
+        wall_time_tracker.plan.concurrency_limit
+        if wall_time_tracker is not None
+        else 1
+    )
+    active_count = 0
 
     if wall_time_tracker is not None:
         sync_analyst_tracker_from_chunk(wall_time_tracker, chunk)
@@ -902,14 +907,14 @@ def update_analyst_statuses(message_buffer, chunk, wall_time_tracker=None):
 
         if has_report:
             message_buffer.update_agent_status(agent_name, "completed")
-        elif not found_active:
+        elif active_count < concurrency:
             message_buffer.update_agent_status(agent_name, "in_progress")
-            found_active = True
+            active_count += 1
         else:
             message_buffer.update_agent_status(agent_name, "pending")
 
     # When all analysts complete, transition research team to in_progress
-    if not found_active and selected:
+    if active_count == 0 and selected:
         if message_buffer.agent_status.get("Bull Researcher") == "pending":
             message_buffer.update_agent_status("Bull Researcher", "in_progress")
 
@@ -1101,10 +1106,15 @@ def run_analysis(checkpoint: bool = False):
         )
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
-        # Update agent status to in_progress for the first analyst
-        first_analyst = get_initial_analyst_node(analyst_execution_plan)
-        message_buffer.update_agent_status(first_analyst, "in_progress")
-        analyst_wall_time_tracker.mark_started(selected_analyst_keys[0])
+        # Mark the initial active window in_progress and start its wall-time
+        # clocks before streaming. With concurrency_limit > 1 several analysts
+        # launch together, so the first concurrency_limit analysts (in plan
+        # order) go active at once rather than just the first one.
+        for spec in analyst_execution_plan.specs[
+            : analyst_execution_plan.concurrency_limit
+        ]:
+            message_buffer.update_agent_status(spec.agent_node, "in_progress")
+        analyst_wall_time_tracker.mark_initial_active()
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
         # Create spinner text

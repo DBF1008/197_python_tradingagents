@@ -104,6 +104,26 @@ class AnalystWallTimeTracker:
         finished_at = monotonic() if completed_at is None else completed_at
         self._wall_times[analyst_key] = max(0.0, finished_at - started_at)
 
+    def mark_initial_active(self, started_at: Optional[float] = None) -> None:
+        """Start the initial active window: the first ``concurrency_limit``
+        analysts that run before the graph emits its first chunk.
+
+        Anchoring these starts here (just before streaming begins) is more
+        accurate than waiting for the first chunk, which only arrives after
+        the first node has run.
+        """
+        start = monotonic() if started_at is None else started_at
+        for spec in self.plan.specs[: self.plan.concurrency_limit]:
+            self.mark_started(spec.key, started_at=start)
+
+    def active_keys(self) -> List[str]:
+        """Analysts that have started but not yet completed (currently running)."""
+        return [
+            key
+            for key in self._started_at
+            if key not in self._wall_times
+        ]
+
     def get_wall_times(self) -> Dict[str, float]:
         return dict(self._wall_times)
 
@@ -124,17 +144,43 @@ def sync_analyst_tracker_from_chunk(
     chunk: Dict[str, str],
     now: Optional[float] = None,
 ) -> None:
+    """Reconcile the wall-time tracker against a streamed graph chunk.
+
+    Works for any ``concurrency_limit``. Two passes run per chunk:
+
+    1. Completion pass — any analyst whose report is present in this chunk is
+       marked completed at ``now``. Completion is idempotent and uses the
+       analyst's *original* start time, so a chunk that merely re-carries an
+       already-finished report (or omits a finished one entirely) leaves the
+       recorded wall time untouched.
+    2. Activation pass — the first ``concurrency_limit`` not-yet-completed
+       analysts (in plan order) are marked started. This opens a slot for the
+       next analyst the moment an earlier one finishes, so several analysts can
+       be active at once and each accumulates real wall time from its own start.
+
+    The tracker's own completion state (``get_wall_times``) drives the active
+    window, so this stays correct even when the stream emits per-node deltas
+    that do not repeat previously seen reports.
+    """
     current_time = monotonic() if now is None else now
-    active_found = False
 
+    # Pass 1: complete every analyst whose report landed in this chunk.
     for spec in tracker.plan.specs:
-        has_report = bool(chunk.get(spec.report_key))
-
-        if has_report:
-            tracker.mark_started(spec.key, started_at=current_time)
-            tracker.mark_completed(spec.key, completed_at=current_time)
+        if not bool(chunk.get(spec.report_key)):
             continue
+        # Guarantee a start time so an analyst whose report we see before it was
+        # ever activated still appears in the summary (collapsing to ~0s) rather
+        # than vanishing; an already-active analyst keeps its real start.
+        tracker.mark_started(spec.key, started_at=current_time)
+        tracker.mark_completed(spec.key, completed_at=current_time)
 
-        if not active_found:
-            tracker.mark_started(spec.key, started_at=current_time)
-            active_found = True
+    # Pass 2: keep up to concurrency_limit not-yet-completed analysts active.
+    completed = tracker.get_wall_times()
+    slots = tracker.plan.concurrency_limit
+    for spec in tracker.plan.specs:
+        if slots <= 0:
+            break
+        if spec.key in completed:
+            continue
+        tracker.mark_started(spec.key, started_at=current_time)
+        slots -= 1

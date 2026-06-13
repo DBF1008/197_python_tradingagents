@@ -93,3 +93,177 @@ class AnalystWallTimeTrackerTests(unittest.TestCase):
             tracker.get_wall_times(),
             {"market": 3.0, "news": 5.0},
         )
+
+
+class AnalystTrackerConcurrencyTests(unittest.TestCase):
+    def test_concurrent_startup_marks_whole_window_active(self):
+        # With concurrency_limit=2, both analysts launch together. The first
+        # chunk carries no report yet (analysts are still calling tools), so
+        # both must be marked active rather than only the first.
+        plan = build_analyst_execution_plan(
+            ["market", "news"], concurrency_limit=2
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+
+        self.assertEqual(set(tracker.active_keys()), {"market", "news"})
+        self.assertEqual(tracker.get_wall_times(), {})
+
+    def test_interleaved_completion_records_each_real_wall_time(self):
+        # Two analysts start at t=10. News finishes first at t=14, market
+        # finishes later at t=17. Market's wall time must span from its own
+        # start (10), not collapse to the completion chunk time, and news
+        # finishing first must not disturb market's clock.
+        plan = build_analyst_execution_plan(
+            ["market", "news"], concurrency_limit=2
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        sync_analyst_tracker_from_chunk(
+            tracker, {"news_report": "done"}, now=14.0
+        )
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=17.0
+        )
+
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 7.0, "news": 4.0},
+        )
+
+    def test_completion_opens_next_slot_in_sliding_window(self):
+        # concurrency_limit=2 over three analysts: market+news run first;
+        # when market completes, fundamentals must enter the window and its
+        # clock must start at the slot-open time (15), not at its report.
+        plan = build_analyst_execution_plan(
+            ["market", "news", "fundamentals"], concurrency_limit=2
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        self.assertEqual(set(tracker.active_keys()), {"market", "news"})
+
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=15.0
+        )
+        self.assertEqual(tracker.get_wall_times(), {"market": 5.0})
+        self.assertEqual(set(tracker.active_keys()), {"news", "fundamentals"})
+
+        sync_analyst_tracker_from_chunk(
+            tracker, {"news_report": "done"}, now=20.0
+        )
+        sync_analyst_tracker_from_chunk(
+            tracker, {"fundamentals_report": "done"}, now=22.0
+        )
+
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 5.0, "news": 10.0, "fundamentals": 7.0},
+        )
+
+    def test_long_running_analyst_accumulates_until_report_lands(self):
+        # An analyst with no report across several chunks keeps its original
+        # start; its wall time is measured only when the report finally lands.
+        plan = build_analyst_execution_plan(
+            ["market", "news"], concurrency_limit=2
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        sync_analyst_tracker_from_chunk(
+            tracker, {"news_report": "done"}, now=14.0
+        )
+        # market still running across an empty chunk
+        sync_analyst_tracker_from_chunk(tracker, {}, now=20.0)
+        self.assertEqual(tracker.active_keys(), ["market"])
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=25.0
+        )
+
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 15.0, "news": 4.0},
+        )
+
+    def test_repeated_report_chunk_is_idempotent(self):
+        # Streaming may re-deliver an already-finished report (or batch it with
+        # later ones). A repeated report must not reset or extend wall time.
+        plan = build_analyst_execution_plan(
+            ["market", "news"], concurrency_limit=2
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=13.0
+        )
+        # market_report re-appears in later chunks at unrelated times
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=99.0
+        )
+        sync_analyst_tracker_from_chunk(
+            tracker,
+            {"market_report": "done", "news_report": "done"},
+            now=100.0,
+        )
+
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 3.0, "news": 90.0},
+        )
+
+    def test_serial_mode_keeps_single_active_analyst(self):
+        # concurrency_limit=1 must behave exactly as before: only one analyst
+        # active at a time, the next starting only once the prior completes.
+        plan = build_analyst_execution_plan(
+            ["market", "news"], concurrency_limit=1
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        self.assertEqual(tracker.active_keys(), ["market"])
+
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=13.0
+        )
+        self.assertEqual(tracker.active_keys(), ["news"])
+        self.assertEqual(tracker.get_wall_times(), {"market": 3.0})
+
+        sync_analyst_tracker_from_chunk(
+            tracker,
+            {"market_report": "done", "news_report": "done"},
+            now=18.0,
+        )
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 3.0, "news": 5.0},
+        )
+
+    def test_mark_initial_active_anchors_window_before_streaming(self):
+        # The CLI starts the initial window before the first chunk arrives.
+        # That pre-stream start (t=5) is what a later report measures against,
+        # which is exactly the case the old serial logic collapsed to ~0s.
+        plan = build_analyst_execution_plan(
+            ["market", "news", "fundamentals"], concurrency_limit=2
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        tracker.mark_initial_active(started_at=5.0)
+        self.assertEqual(set(tracker.active_keys()), {"market", "news"})
+
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=12.0
+        )
+        self.assertEqual(tracker.get_wall_times(), {"market": 7.0})
+
+    def test_mark_initial_active_serial_starts_only_first(self):
+        plan = build_analyst_execution_plan(
+            ["market", "news"], concurrency_limit=1
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        tracker.mark_initial_active(started_at=5.0)
+
+        self.assertEqual(tracker.active_keys(), ["market"])
