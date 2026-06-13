@@ -41,7 +41,15 @@ from tradingagents.agents.utils.agent_utils import (
     get_global_news
 )
 
-from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
+from .checkpointer import (
+    checkpoint_step,
+    clear_thread,
+    get_checkpointer,
+    plan_resume,
+    thread_id,
+    write_manifest,
+)
+from .resume_policy import ResumeDecision, RunManifest
 from .conditional_logic import ConditionalLogic
 from .setup import GraphSetup
 from .propagation import Propagator
@@ -130,10 +138,16 @@ class TradingAgentsGraph:
         self.ticker = None
         self.log_states_dict = {}  # date to full state dict
 
+        # Canonical analyst keys for this graph — folded into the checkpoint
+        # thread id and recorded in the run manifest so different analyst
+        # combinations get isolated checkpoints.
+        self.selected_analysts = [str(a).strip().lower() for a in selected_analysts]
+
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
+        self._resume_tid = None
 
     def _get_provider_kwargs(self) -> Dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
@@ -313,6 +327,121 @@ class TradingAgentsGraph:
         identity = resolve_instrument_identity(ticker)
         return build_instrument_context(ticker, asset_type, identity)
 
+    def build_run_manifest(
+        self, trade_date, asset_type, tid: str = None, last_step: Optional[int] = None
+    ) -> RunManifest:
+        """Build the auditable manifest for the current run from config + analysts."""
+        tid = tid or thread_id(self.ticker, str(trade_date), self.selected_analysts)
+        return RunManifest.build(
+            thread_id=tid,
+            ticker=self.ticker,
+            trade_date=str(trade_date),
+            asset_type=asset_type,
+            analysts=self.selected_analysts,
+            config=self.config,
+            last_step=last_step,
+        )
+
+    def begin_checkpointed_run(
+        self, trade_date, asset_type: str = "stock"
+    ) -> Optional[ResumeDecision]:
+        """Arm checkpointing for a run and return the resume decision (or None).
+
+        Computes the resume plan, applies the drift policy (targeted clear of
+        this run's thread unless ``checkpoint_strict`` raises), writes the run
+        manifest, then opens the SqliteSaver and recompiles ``self.graph`` *with*
+        the checkpointer — that recompilation is what actually makes a streamed
+        or invoked graph persist state. Returns ``None`` when checkpointing is
+        disabled. Callers must set ``self.ticker`` before calling.
+        """
+        if not self.config.get("checkpoint_enabled"):
+            return None
+
+        data_dir = self.config["data_cache_dir"]
+        strict = self.config.get("checkpoint_strict", False)
+        decision, tid = plan_resume(
+            data_dir,
+            self.ticker,
+            trade_date,
+            asset_type,
+            self.selected_analysts,
+            self.config,
+            strict=strict,
+        )
+        self._resume_tid = tid
+
+        if decision.requires_clear:
+            if strict:
+                raise RuntimeError(
+                    "Refusing to resume incompatible checkpoint "
+                    f"(checkpoint_strict enabled):\n{decision.summary()}"
+                )
+            # Discard ONLY this run's mismatched state; other threads untouched.
+            clear_thread(data_dir, self.ticker, tid)
+
+        # Write the manifest before opening the long-lived saver so there is a
+        # single writer at a time. After a clear/fresh start there is no step yet.
+        manifest_step = None if decision.requires_clear else decision.last_step
+        write_manifest(
+            data_dir,
+            self.ticker,
+            self.build_run_manifest(trade_date, asset_type, tid, manifest_step),
+        )
+
+        self._checkpointer_ctx = get_checkpointer(data_dir, self.ticker)
+        saver = self._checkpointer_ctx.__enter__()
+        self.graph = self.workflow.compile(checkpointer=saver)
+        return decision
+
+    def apply_checkpoint_args(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Inject the active (analyst-aware) thread id into graph args when enabled."""
+        if self.config.get("checkpoint_enabled") and self._resume_tid:
+            args.setdefault("config", {}).setdefault("configurable", {})[
+                "thread_id"
+            ] = self._resume_tid
+        return args
+
+    def finish_checkpointed_run(
+        self, success: bool, trade_date=None, asset_type=None
+    ) -> None:
+        """Tear down checkpointing.
+
+        On success the thread's checkpoint + manifest are cleared (a completed
+        run has nothing to resume). On failure the manifest's ``last_step``
+        breadcrumb is refreshed from the live checkpoint. Either way the plain,
+        no-checkpointer graph is restored. No-op when no run was armed.
+        """
+        if self._checkpointer_ctx is None:
+            return
+
+        data_dir = self.config["data_cache_dir"]
+        tid = self._resume_tid
+
+        # Close the saver first so the manifest/clear ops below don't contend
+        # with it on the same DB file.
+        try:
+            self._checkpointer_ctx.__exit__(None, None, None)
+        finally:
+            self._checkpointer_ctx = None
+            self.graph = self.workflow.compile()
+
+        try:
+            if success and tid:
+                clear_thread(data_dir, self.ticker, tid)
+            elif not success and tid and trade_date is not None:
+                live = checkpoint_step(
+                    data_dir, self.ticker, str(trade_date), self.selected_analysts
+                )
+                write_manifest(
+                    data_dir,
+                    self.ticker,
+                    self.build_run_manifest(
+                        trade_date, asset_type or "stock", tid, live
+                    ),
+                )
+        finally:
+            self._resume_tid = None
+
     def propagate(self, company_name, trade_date, asset_type: str = "stock"):
         """Run the trading agents graph for a company on a specific date.
 
@@ -328,31 +457,20 @@ class TradingAgentsGraph:
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
 
-        # Recompile with a checkpointer if the user opted in.
-        if self.config.get("checkpoint_enabled"):
-            self._checkpointer_ctx = get_checkpointer(
-                self.config["data_cache_dir"], company_name
-            )
-            saver = self._checkpointer_ctx.__enter__()
-            self.graph = self.workflow.compile(checkpointer=saver)
+        # Arm checkpointing (no-op unless checkpoint_enabled) and preview the
+        # resume decision. Incompatible/drifted state is discarded inside
+        # begin_checkpointed_run per the resume policy.
+        decision = self.begin_checkpointed_run(trade_date, asset_type)
+        if decision is not None:
+            logger.info(decision.summary())
 
-            step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
-            if step is not None:
-                logger.info(
-                    "Resuming from step %d for %s on %s", step, company_name, trade_date
-                )
-            else:
-                logger.info("Starting fresh for %s on %s", company_name, trade_date)
-
+        success = False
         try:
-            return self._run_graph(company_name, trade_date, asset_type=asset_type)
+            result = self._run_graph(company_name, trade_date, asset_type=asset_type)
+            success = True
+            return result
         finally:
-            if self._checkpointer_ctx is not None:
-                self._checkpointer_ctx.__exit__(None, None, None)
-                self._checkpointer_ctx = None
-                self.graph = self.workflow.compile()
+            self.finish_checkpointed_run(success, trade_date, asset_type)
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""
@@ -369,10 +487,8 @@ class TradingAgentsGraph:
         )
         args = self.propagator.get_graph_args()
 
-        # Inject thread_id so same ticker+date resumes, different date starts fresh.
-        if self.config.get("checkpoint_enabled"):
-            tid = thread_id(company_name, str(trade_date))
-            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+        # Inject the active (analyst-aware) checkpoint thread id when enabled.
+        args = self.apply_checkpoint_args(args)
 
         if self.debug:
             trace = []
@@ -403,12 +519,7 @@ class TradingAgentsGraph:
             final_trade_decision=final_state["final_trade_decision"],
         )
 
-        # Clear checkpoint on successful completion to avoid stale state.
-        if self.config.get("checkpoint_enabled"):
-            clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
-
+        # Checkpoint cleanup on success is handled by finish_checkpointed_run().
         return final_state, self.process_signal(final_state["final_trade_decision"])
 
     def _log_state(self, trade_date, final_state):
