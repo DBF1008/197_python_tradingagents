@@ -28,7 +28,7 @@ from tradingagents.graph.analyst_execution import (
     get_initial_analyst_node,
     sync_analyst_tracker_from_chunk,
 )
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, get_default_config
 from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
@@ -992,8 +992,10 @@ def run_analysis(checkpoint: bool = False):
     # First get all user selections
     selections = get_user_selections()
 
-    # Create config with selected research depth
-    config = DEFAULT_CONFIG.copy()
+    # Create config with selected research depth. get_default_config() returns a
+    # deep copy, so the per-run scalar/nested overrides below never leak back into
+    # the module-level DEFAULT_CONFIG and bleed across runs.
+    config = get_default_config()
     config["max_debate_rounds"] = selections["research_depth"]
     config["max_risk_discuss_rounds"] = selections["research_depth"]
     config["quick_think_llm"] = selections["shallow_thinker"]

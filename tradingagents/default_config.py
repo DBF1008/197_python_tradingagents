@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
@@ -128,3 +129,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "":     "SPY",         # default for US-listed tickers (no suffix)
     },
 })
+
+
+def get_default_config() -> dict:
+    """Return an isolated deep copy of ``DEFAULT_CONFIG`` that is safe to mutate.
+
+    ``DEFAULT_CONFIG`` holds nested ``dict``/``list`` values (``data_vendors``,
+    ``tool_vendors``, ``benchmark_map``, ``global_news_queries``). A shallow
+    ``dict.copy()`` aliases those nested objects, so a single run overriding,
+    say, one data vendor or one benchmark suffix would mutate the module-level
+    default in place and bleed into every later run, test, or graph instance.
+    Deep-copying here makes this the one supported way to obtain a runtime
+    config: callers may freely mutate the result without touching the shared
+    template. Env-var overrides (TRADINGAGENTS_*) are already baked into
+    ``DEFAULT_CONFIG`` at import, so the returned copy reflects them.
+    """
+    return deepcopy(DEFAULT_CONFIG)

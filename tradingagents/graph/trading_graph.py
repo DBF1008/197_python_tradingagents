@@ -1,5 +1,6 @@
 # TradingAgents/graph/trading_graph.py
 
+import copy
 import logging
 import os
 from pathlib import Path
@@ -16,7 +17,7 @@ from langgraph.prebuilt import ToolNode
 from tradingagents.llm_clients import create_llm_client
 
 from tradingagents.agents import *
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import get_default_config
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.agents.utils.agent_states import (
@@ -68,7 +69,12 @@ class TradingAgentsGraph:
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
         """
         self.debug = debug
-        self.config = config or DEFAULT_CONFIG
+        # Hold an isolated deep copy of the config so nested dicts/lists
+        # (data_vendors, tool_vendors, benchmark_map, global_news_queries) are
+        # never shared with the caller's dict, the module-level DEFAULT_CONFIG,
+        # or another graph instance. A passed-in config is copied too, so two
+        # graphs (and their callers) can mutate their own configs independently.
+        self.config = copy.deepcopy(config) if config else get_default_config()
         self.callbacks = callbacks or []
 
         # Update the interface's config
