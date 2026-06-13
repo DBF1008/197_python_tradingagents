@@ -35,10 +35,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_news,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
-)
+from tradingagents.agents.utils.structured import bind_structured
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 
@@ -55,7 +52,7 @@ def create_sentiment_analyst(llm):
     report via structured output (with a free-text fallback for providers
     that do not support it).
     """
-    structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst")
+    binding = bind_structured(llm, SentimentReport, "Sentiment Analyst")
 
     def sentiment_analyst_node(state):
         ticker = state["company_of_interest"]
@@ -102,13 +99,7 @@ def create_sentiment_analyst(llm):
         # data is already in the prompt.
         formatted_messages = prompt.format_messages(messages=state["messages"])
 
-        report_text = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            formatted_messages,
-            render_sentiment_report,
-            "Sentiment Analyst",
-        )
+        report_text = binding.invoke(formatted_messages, render_sentiment_report)
 
         return {
             "messages": [AIMessage(content=report_text)],

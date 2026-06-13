@@ -7,6 +7,7 @@ behavior we added for the Trader, Research Manager, and Sentiment Analyst
 so they share the same deterministic output shape.
 """
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +27,7 @@ from tradingagents.agents.schemas import (
     render_trader_proposal,
 )
 from tradingagents.agents.trader.trader import create_trader
+from tradingagents.agents.utils.structured import StructuredBinding, bind_structured
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +360,226 @@ class TestSentimentAnalystAgent:
         llm.with_structured_output.return_value = structured
         llm.invoke.return_value = MagicMock(content=plain)
         assert create_sentiment_analyst(llm)(_make_sentiment_state())["sentiment_report"] == plain
+
+
+# ---------------------------------------------------------------------------
+# Sticky fallback — bind_structured / StructuredBinding (the unit that changed)
+# ---------------------------------------------------------------------------
+
+
+def _render(result):
+    """Trivial render used by binding-level tests: turn a structured result
+    into a deterministic string so the happy path is distinguishable from the
+    free-text path (which returns ``response.content`` instead)."""
+    return f"RENDERED::{result}"
+
+
+def _binding_llm(*, structured_side_effect=None, structured_return="OBJ", plain_content="PLAIN"):
+    """Build a MagicMock LLM and its structured binding for StructuredBinding tests.
+
+    The structured binding's ``.invoke`` either raises (``structured_side_effect``)
+    or returns ``structured_return``; the plain ``llm.invoke`` returns an object
+    whose ``.content`` is ``plain_content``. Returns ``(llm, structured)`` so a
+    test can assert call counts on both the structured and free-text paths.
+    """
+    structured = MagicMock()
+    if structured_side_effect is not None:
+        structured.invoke.side_effect = structured_side_effect
+    else:
+        structured.invoke.return_value = structured_return
+    llm = MagicMock()
+    llm.with_structured_output.return_value = structured
+    llm.invoke.return_value = MagicMock(content=plain_content)
+    return llm, structured
+
+
+@pytest.mark.unit
+class TestStructuredBindingStickyFallback:
+    """The sticky free-text fallback, exercised directly on the helper.
+
+    Pinning the behavior here (independently of any agent's wiring) covers the
+    four required cases: first failure becomes sticky, the success path is
+    untouched, distinct bindings are isolated, and the original
+    unsupported-at-bind branch still degrades to free text.
+    """
+
+    def test_bind_structured_returns_a_binding(self):
+        llm, _ = _binding_llm()
+        binding = bind_structured(llm, TraderProposal, "Trader")
+        assert isinstance(binding, StructuredBinding)
+        assert binding.uses_structured_output is True
+
+    def test_runtime_failure_makes_fallback_sticky(self):
+        """First runtime failure disables structured; later calls don't retry it."""
+        llm, structured = _binding_llm(
+            structured_side_effect=ValueError("400 response_format unsupported")
+        )
+        binding = bind_structured(llm, TraderProposal, "Trader")
+        assert binding.uses_structured_output is True  # supported at bind time
+
+        first = binding.invoke("p1", _render)
+        second = binding.invoke("p2", _render)
+
+        assert first == "PLAIN"
+        assert second == "PLAIN"
+        # Structured attempted exactly once, then permanently disabled.
+        assert structured.invoke.call_count == 1
+        assert llm.invoke.call_count == 2
+        assert binding.uses_structured_output is False
+
+    def test_sticky_fallback_warns_exactly_once(self, caplog):
+        """The recurring incompatibility must not spam a warning per call."""
+        llm, _ = _binding_llm(structured_side_effect=ValueError("400"))
+        binding = bind_structured(llm, TraderProposal, "Trader")
+        with caplog.at_level(
+            logging.WARNING, logger="tradingagents.agents.utils.structured"
+        ):
+            binding.invoke("p", _render)
+            binding.invoke("p", _render)
+            binding.invoke("p", _render)
+        failures = [
+            r for r in caplog.records
+            if "structured-output invocation failed" in r.getMessage()
+        ]
+        assert len(failures) == 1
+
+    def test_successful_structured_calls_stay_structured(self):
+        """Success path keeps using structured output and never goes sticky."""
+        llm, structured = _binding_llm(structured_return="OBJ")
+        binding = bind_structured(llm, TraderProposal, "Trader")
+
+        assert binding.invoke("p", _render) == "RENDERED::OBJ"
+        assert binding.invoke("p", _render) == "RENDERED::OBJ"
+
+        assert structured.invoke.call_count == 2
+        assert llm.invoke.call_count == 0  # plain fallback untouched
+        assert binding.uses_structured_output is True
+
+    def test_unsupported_at_bind_uses_freetext_every_call(self, caplog):
+        """Original branch: provider unsupported at bind time → free text on every call."""
+        llm = MagicMock()
+        llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
+        llm.invoke.return_value = MagicMock(content="PLAIN")
+
+        with caplog.at_level(
+            logging.WARNING, logger="tradingagents.agents.utils.structured"
+        ):
+            binding = bind_structured(llm, TraderProposal, "Trader")
+
+        assert binding.uses_structured_output is False
+        assert binding.invoke("p", _render) == "PLAIN"
+        assert binding.invoke("p", _render) == "PLAIN"
+        # Bound once at creation; not re-attempted on each invoke.
+        assert llm.with_structured_output.call_count == 1
+        assert llm.invoke.call_count == 2
+        assert any(
+            "does not support with_structured_output" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_distinct_bindings_do_not_share_sticky_state(self):
+        """One binding degrading must not affect another (per agent + per schema)."""
+        # Binding A: structured always fails -> goes sticky.
+        llm_a, _ = _binding_llm(structured_side_effect=ValueError("400"))
+        # Binding B: independent llm + a different schema; structured works.
+        llm_b, structured_b = _binding_llm(structured_return="B")
+        binding_a = bind_structured(llm_a, TraderProposal, "A")
+        binding_b = bind_structured(llm_b, ResearchPlan, "B")
+
+        binding_a.invoke("p", _render)  # trip A into sticky fallback
+        assert binding_a.uses_structured_output is False
+
+        # B is unaffected by A's degradation.
+        assert binding_b.invoke("p", _render) == "RENDERED::B"
+        assert binding_b.invoke("p", _render) == "RENDERED::B"
+        assert binding_b.uses_structured_output is True
+        assert structured_b.invoke.call_count == 2
+        assert llm_b.invoke.call_count == 0
+
+
+@pytest.mark.unit
+class TestAgentStickyFallback:
+    """The sticky fallback as wired through the real agent factories.
+
+    Confirms a runtime structured failure on one call is not retried on the
+    next, the markdown output contract holds on the free-text path, the
+    success path is untouched, and one agent degrading does not bleed into a
+    different agent with a different schema.
+    """
+
+    def test_trader_sticky_fallback_across_repeated_calls(self):
+        plain_response = (
+            "**Action**: Hold\n\nNo edge in the setup.\n\n"
+            "FINAL TRANSACTION PROPOSAL: **HOLD**"
+        )
+        structured = MagicMock()
+        structured.invoke.side_effect = ValueError("400 response_format unsupported")
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        llm.invoke.return_value = MagicMock(content=plain_response)
+
+        trader = create_trader(llm)
+        first = trader(_make_trader_state())
+        second = trader(_make_trader_state())
+
+        # Output contract preserved via free text on both calls.
+        assert first["trader_investment_plan"] == plain_response
+        assert second["trader_investment_plan"] == plain_response
+        # Structured attempted once; the second call did not retry it.
+        assert structured.invoke.call_count == 1
+        assert llm.invoke.call_count == 2
+
+    def test_trader_repeated_structured_success_never_falls_back(self):
+        captured = {}
+        llm = _structured_trader_llm(
+            captured, TraderProposal(action=TraderAction.BUY, reasoning="Strong setup.")
+        )
+        structured = llm.with_structured_output.return_value
+        trader = create_trader(llm)
+
+        a = trader(_make_trader_state())["trader_investment_plan"]
+        b = trader(_make_trader_state())["trader_investment_plan"]
+
+        assert "FINAL TRANSACTION PROPOSAL: **BUY**" in a
+        assert "FINAL TRANSACTION PROPOSAL: **BUY**" in b
+        assert structured.invoke.call_count == 2
+        assert llm.invoke.call_count == 0  # plain path untouched on success
+
+    def test_sticky_fallback_isolated_across_agents_and_schemas(self):
+        # Trader: structured always fails -> sticky free-text.
+        trader_plain = (
+            "**Action**: Sell\n\nGuidance cut hits margins.\n\n"
+            "FINAL TRANSACTION PROPOSAL: **SELL**"
+        )
+        t_structured = MagicMock()
+        t_structured.invoke.side_effect = ValueError("400")
+        t_llm = MagicMock()
+        t_llm.with_structured_output.return_value = t_structured
+        t_llm.invoke.return_value = MagicMock(content=trader_plain)
+        trader = create_trader(t_llm)
+
+        # Research Manager: independent llm + a different schema; structured works.
+        rm_captured = {}
+        rm_llm = _structured_rm_llm(
+            rm_captured,
+            ResearchPlan(
+                recommendation=PortfolioRating.OVERWEIGHT,
+                rationale="Bull case is stronger.",
+                strategic_actions="Build position gradually.",
+            ),
+        )
+        rm_structured = rm_llm.with_structured_output.return_value
+        rm = create_research_manager(rm_llm)
+
+        # Trip the trader into its sticky fallback (twice).
+        trader(_make_trader_state())
+        trader(_make_trader_state())
+        # The RM shares no state with the trader and still uses structured.
+        rm_plan = rm(_make_rm_state())["investment_plan"]
+        rm(_make_rm_state())
+
+        assert t_structured.invoke.call_count == 1  # trader stuck on free text
+        assert t_llm.invoke.call_count == 2
+        assert "**Recommendation**: Overweight" in rm_plan  # RM rendered structured
+        assert rm_structured.invoke.call_count == 2  # RM never went sticky
+        assert rm_llm.invoke.call_count == 0

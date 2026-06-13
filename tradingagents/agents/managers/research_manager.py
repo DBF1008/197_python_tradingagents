@@ -7,14 +7,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
-)
+from tradingagents.agents.utils.structured import bind_structured
 
 
 def create_research_manager(llm):
-    structured_llm = bind_structured(llm, ResearchPlan, "Research Manager")
+    binding = bind_structured(llm, ResearchPlan, "Research Manager")
 
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
@@ -42,13 +39,7 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
 **Debate History:**
 {history}""" + get_language_instruction()
 
-        investment_plan = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            prompt,
-            render_research_plan,
-            "Research Manager",
-        )
+        investment_plan = binding.invoke(prompt, render_research_plan)
 
         new_investment_debate_state = {
             "judge_decision": investment_plan,

@@ -15,14 +15,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
-)
+from tradingagents.agents.utils.structured import bind_structured
 
 
 def create_portfolio_manager(llm):
-    structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+    binding = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
@@ -63,13 +60,7 @@ def create_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
 
-        final_trade_decision = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            prompt,
-            render_pm_decision,
-            "Portfolio Manager",
-        )
+        final_trade_decision = binding.invoke(prompt, render_pm_decision)
 
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,

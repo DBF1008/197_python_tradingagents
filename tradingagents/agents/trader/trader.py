@@ -11,14 +11,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
-)
+from tradingagents.agents.utils.structured import bind_structured
 
 
 def create_trader(llm):
-    structured_llm = bind_structured(llm, TraderProposal, "Trader")
+    binding = bind_structured(llm, TraderProposal, "Trader")
 
     def trader_node(state, name):
         company_name = state["company_of_interest"]
@@ -48,13 +45,7 @@ def create_trader(llm):
             },
         ]
 
-        trader_plan = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            messages,
-            render_trader_proposal,
-            "Trader",
-        )
+        trader_plan = binding.invoke(messages, render_trader_proposal)
 
         return {
             "messages": [AIMessage(content=trader_plan)],
