@@ -4,6 +4,7 @@ from typing import Any, Optional
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
+from . import provider_registry
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
@@ -148,39 +149,30 @@ _PASSTHROUGH_KWARGS = (
     "api_key", "callbacks", "http_client", "http_async_client",
 )
 
-# Provider base URLs. API-key env vars live in api_key_env.PROVIDER_API_KEY_ENV
-# (one canonical mapping consulted by both this client and the CLI's
-# interactive key-prompt). Dual-region providers (qwen/glm/minimax) keep
-# separate endpoints because international and China accounts cannot share
-# credentials (#758).
-_PROVIDER_BASE_URL = {
-    "xai":        "https://api.x.ai/v1",
-    "deepseek":   "https://api.deepseek.com",
-    "qwen":       "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-    "qwen-cn":    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "glm":        "https://api.z.ai/api/paas/v4/",
-    "glm-cn":     "https://open.bigmodel.cn/api/paas/v4/",
-    "minimax":    "https://api.minimax.io/v1",
-    "minimax-cn": "https://api.minimaxi.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "ollama":     "http://localhost:11434/v1",
+# Provider base URLs, dual-region pairings, API-key env vars, the responses-API
+# flag, and the chat-subclass routing now all live in the provider registry —
+# one canonical source consulted by this client, the CLI provider table, and the
+# region menus. Dual-region providers (qwen/glm/minimax) keep separate endpoints
+# because international and China accounts cannot share credentials (#758).
+#
+# Maps a registry ``chat_variant`` to the NormalizedChatOpenAI subclass that
+# carries that provider's quirks. Anything not listed uses the plain base class.
+_CHAT_VARIANTS = {
+    "deepseek": DeepSeekChatOpenAI,
+    "minimax": MinimaxChatOpenAI,
 }
 
 
 def _resolve_provider_base_url(provider: str) -> Optional[str]:
-    """Default base URL for ``provider``, with env-var overrides where defined.
+    """Base URL to inject into the client for ``provider`` (None => SDK default).
 
-    Currently only Ollama supports an env-var override (``OLLAMA_BASE_URL``),
-    matching the convention in the broader Ollama tooling ecosystem so users
-    can point at a remote ollama-serve without editing code. The check is
-    call-time, not import-time, so tests that monkeypatch the env after
-    import behave correctly.
+    Thin wrapper over :func:`provider_registry.resolve_base_url`, kept as a
+    module-level function because the env override (e.g. ``OLLAMA_BASE_URL``) is
+    read at call time, so tests that monkeypatch the env after import still see
+    it. Returns None for native OpenAI (which uses the SDK's default endpoint and
+    auto-reads its API key) and for unknown providers.
     """
-    if provider == "ollama":
-        env_url = os.environ.get("OLLAMA_BASE_URL")
-        if env_url:
-            return env_url
-    return _PROVIDER_BASE_URL.get(provider)
+    return provider_registry.resolve_base_url(provider)
 
 
 class OpenAIClient(BaseLLMClient):
@@ -210,8 +202,12 @@ class OpenAIClient(BaseLLMClient):
         # Provider-specific base URL and auth. An explicit base_url on the
         # client (e.g. a corporate proxy) takes precedence over the
         # provider default so users can route through their own gateway.
-        if self.provider in _PROVIDER_BASE_URL:
-            llm_kwargs["base_url"] = self.base_url or _resolve_provider_base_url(self.provider)
+        # A non-None resolved URL marks the OpenAI-compatible providers that
+        # need explicit base-URL/key injection; native OpenAI resolves to None
+        # and instead uses the SDK default endpoint + auto-read API key.
+        resolved_base_url = _resolve_provider_base_url(self.provider)
+        if resolved_base_url is not None:
+            llm_kwargs["base_url"] = self.base_url or resolved_base_url
             api_key_env = get_api_key_env(self.provider)
             if api_key_env:
                 api_key = os.environ.get(api_key_env)
@@ -235,17 +231,15 @@ class OpenAIClient(BaseLLMClient):
 
         # Native OpenAI: use Responses API for consistent behavior across
         # all model families. Third-party providers use Chat Completions.
-        if self.provider == "openai":
+        if provider_registry.uses_responses_api(self.provider):
             llm_kwargs["use_responses_api"] = True
 
-        # Provider-specific quirks live in their own subclasses so the
-        # base NormalizedChatOpenAI stays free of provider branches.
-        if self.provider == "deepseek":
-            chat_cls = DeepSeekChatOpenAI
-        elif self.provider in ("minimax", "minimax-cn"):
-            chat_cls = MinimaxChatOpenAI
-        else:
-            chat_cls = NormalizedChatOpenAI
+        # Provider-specific quirks live in their own subclasses so the base
+        # NormalizedChatOpenAI stays free of provider branches; the registry
+        # maps each provider to its chat variant (deepseek / minimax / default).
+        chat_cls = _CHAT_VARIANTS.get(
+            provider_registry.chat_variant(self.provider), NormalizedChatOpenAI
+        )
         return chat_cls(**llm_kwargs)
 
     def validate_model(self) -> bool:

@@ -7,6 +7,7 @@ from dotenv import find_dotenv, set_key
 from rich.console import Console
 
 from cli.models import AnalystType, AssetType
+from tradingagents.llm_clients import provider_registry
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.model_catalog import get_model_options
 
@@ -269,37 +270,22 @@ def select_deep_thinking_agent(provider) -> str:
     return _select_model(provider, "deep")
 
 def _llm_provider_table() -> list[tuple[str, str, str | None]]:
-    """(display_name, provider_key, base_url) for every supported provider.
+    """(display_name, provider_key, base_url) for every main-menu provider.
 
-    Shared by the interactive picker and by env-driven configuration so an
-    env-set provider resolves to the same default endpoint the menu uses.
-    Ollama users can point at a remote ollama-serve via OLLAMA_BASE_URL
-    (convention from the broader Ollama ecosystem); falls back to the
-    localhost default when unset.
+    Derived from the provider registry so the interactive picker, env-driven
+    configuration, and the LLM client all resolve to the same endpoints. Ollama
+    users can point at a remote ollama-serve via OLLAMA_BASE_URL (the registry
+    applies the override); falls back to the localhost default when unset.
     """
-    ollama_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
     return [
-        ("OpenAI", "openai", "https://api.openai.com/v1"),
-        ("Google", "google", None),
-        ("Anthropic", "anthropic", "https://api.anthropic.com/"),
-        ("xAI", "xai", "https://api.x.ai/v1"),
-        ("DeepSeek", "deepseek", "https://api.deepseek.com"),
-        ("Qwen", "qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
-        ("GLM", "glm", "https://open.bigmodel.cn/api/paas/v4/"),
-        ("MiniMax", "minimax", "https://api.minimax.io/v1"),
-        ("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
-        ("Azure OpenAI", "azure", None),
-        ("Ollama", "ollama", ollama_url),
+        (spec.display_name, spec.key, provider_registry.menu_url(spec.key))
+        for spec in provider_registry.main_menu_providers()
     ]
 
 
 def provider_default_url(provider_key: str) -> str | None:
     """Return the default backend URL for a provider key, or None if unknown."""
-    key = provider_key.lower()
-    for _, pk, url in _llm_provider_table():
-        if pk == key:
-            return url
-    return None
+    return provider_registry.menu_url(provider_key)
 
 
 def select_llm_provider() -> tuple[str, str | None]:
@@ -401,11 +387,11 @@ def ask_glm_region() -> tuple[str, str]:
         choices=[
             questionary.Choice(
                 "Z.AI — api.z.ai (international, uses ZHIPU_API_KEY)",
-                value=("glm", "https://api.z.ai/api/paas/v4/"),
+                value=("glm", provider_registry.resolve_base_url("glm")),
             ),
             questionary.Choice(
                 "BigModel — open.bigmodel.cn (China, uses ZHIPU_CN_API_KEY)",
-                value=("glm-cn", "https://open.bigmodel.cn/api/paas/v4/"),
+                value=("glm-cn", provider_registry.resolve_base_url("glm-cn")),
             ),
         ],
         style=questionary.Style([
@@ -428,11 +414,11 @@ def ask_qwen_region() -> tuple[str, str]:
         choices=[
             questionary.Choice(
                 "International — dashscope-intl.aliyuncs.com (uses DASHSCOPE_API_KEY)",
-                value=("qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+                value=("qwen", provider_registry.resolve_base_url("qwen")),
             ),
             questionary.Choice(
                 "China — dashscope.aliyuncs.com (uses DASHSCOPE_CN_API_KEY)",
-                value=("qwen-cn", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                value=("qwen-cn", provider_registry.resolve_base_url("qwen-cn")),
             ),
         ],
         style=questionary.Style([
@@ -455,11 +441,11 @@ def ask_minimax_region() -> tuple[str, str]:
         choices=[
             questionary.Choice(
                 "Global — api.minimax.io (uses MINIMAX_API_KEY)",
-                value=("minimax", "https://api.minimax.io/v1"),
+                value=("minimax", provider_registry.resolve_base_url("minimax")),
             ),
             questionary.Choice(
                 "China — api.minimaxi.com (uses MINIMAX_CN_API_KEY)",
-                value=("minimax-cn", "https://api.minimaxi.com/v1"),
+                value=("minimax-cn", provider_registry.resolve_base_url("minimax-cn")),
             ),
         ],
         style=questionary.Style([
@@ -468,6 +454,24 @@ def ask_minimax_region() -> tuple[str, str]:
             ("pointer", "fg:cyan noinherit"),
         ]),
     ).ask()
+
+
+def maybe_select_region(provider: str, url: str | None) -> tuple[str, str | None]:
+    """Prompt for a region when ``provider`` has dual-region endpoints.
+
+    Returns the ``(provider_key, backend_url)`` for the chosen region, or the
+    inputs unchanged when the provider has no regional split. Dispatch is driven
+    by the provider registry's ``region_group``, so adding a new dual-region
+    provider needs no new branch here — only a registry entry and (if its menu
+    wording differs) an ``ask_*_region`` helper registered below.
+    """
+    region_prompts = {
+        "qwen": ask_qwen_region,
+        "glm": ask_glm_region,
+        "minimax": ask_minimax_region,
+    }
+    prompt = region_prompts.get(provider_registry.region_group_of(provider))
+    return prompt() if prompt else (provider, url)
 
 
 def confirm_ollama_endpoint(url: str) -> None:

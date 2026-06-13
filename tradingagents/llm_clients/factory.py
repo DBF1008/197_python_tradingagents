@@ -1,15 +1,7 @@
 from typing import Optional
 
+from . import provider_registry
 from .base_client import BaseLLMClient
-
-# Providers that use the OpenAI-compatible chat completions API
-_OPENAI_COMPATIBLE = (
-    "openai", "xai", "deepseek",
-    "qwen", "qwen-cn",
-    "glm", "glm-cn",
-    "minimax", "minimax-cn",
-    "ollama", "openrouter",
-)
 
 
 def create_llm_client(
@@ -20,9 +12,11 @@ def create_llm_client(
 ) -> BaseLLMClient:
     """Create an LLM client for the specified provider.
 
-    Provider modules are imported lazily so that simply importing this
-    factory (e.g. during test collection) does not pull in heavy LLM SDKs
-    or fail when their API keys are absent.
+    The provider→client-backend routing is derived from the provider registry
+    (:mod:`tradingagents.llm_clients.provider_registry`). Provider client
+    modules are imported lazily so that simply importing this factory (e.g.
+    during test collection) does not pull in heavy LLM SDKs or fail when their
+    API keys are absent. The registry itself is a lightweight dependency leaf.
 
     Args:
         provider: LLM provider name
@@ -37,20 +31,23 @@ def create_llm_client(
         ValueError: If provider is not supported
     """
     provider_lower = provider.lower()
+    spec = provider_registry.get_spec(provider_lower)
+    if spec is None:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
 
-    if provider_lower in _OPENAI_COMPATIBLE:
+    if spec.client == "openai":
         from .openai_client import OpenAIClient
         return OpenAIClient(model, base_url, provider=provider_lower, **kwargs)
 
-    if provider_lower == "anthropic":
+    if spec.client == "anthropic":
         from .anthropic_client import AnthropicClient
         return AnthropicClient(model, base_url, **kwargs)
 
-    if provider_lower == "google":
+    if spec.client == "google":
         from .google_client import GoogleClient
         return GoogleClient(model, base_url, **kwargs)
 
-    if provider_lower == "azure":
+    if spec.client == "azure":
         from .azure_client import AzureOpenAIClient
         return AzureOpenAIClient(model, base_url, **kwargs)
 

@@ -586,13 +586,10 @@ def get_user_selections():
 
         # Providers with regional endpoints prompt for the region as a secondary
         # step so the main dropdown stays clean (mainland China and international
-        # accounts cannot share API keys).
-        if selected_llm_provider == "qwen":
-            selected_llm_provider, backend_url = ask_qwen_region()
-        elif selected_llm_provider == "minimax":
-            selected_llm_provider, backend_url = ask_minimax_region()
-        elif selected_llm_provider == "glm":
-            selected_llm_provider, backend_url = ask_glm_region()
+        # accounts cannot share API keys). Dispatch is registry-driven.
+        selected_llm_provider, backend_url = maybe_select_region(
+            selected_llm_provider, backend_url
+        )
 
         # For Ollama, surface the resolved endpoint (OLLAMA_BASE_URL vs default)
         # before model selection so it's obvious where we're connecting.
