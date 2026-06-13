@@ -1,10 +1,15 @@
 """Append-only markdown decision log for TradingAgents."""
 
-from typing import List, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List, Optional
 from pathlib import Path
 import re
 
 from tradingagents.agents.utils.rating import parse_rating
+
+if TYPE_CHECKING:
+    from tradingagents.storage import ArtifactStore
 
 
 class TradingMemoryLog:
@@ -16,13 +21,17 @@ class TradingMemoryLog:
     _DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
     _REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict = None, *, store: ArtifactStore | None = None):
         cfg = config or {}
         self._log_path = None
-        path = cfg.get("memory_log_path")
-        if path:
-            self._log_path = Path(path).expanduser()
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        if store is not None:
+            # Unified path policy — store handles validation + dir creation.
+            self._log_path = store.memory_log()
+        else:
+            path = cfg.get("memory_log_path")
+            if path:
+                self._log_path = Path(path).expanduser()
+                self._log_path.parent.mkdir(parents=True, exist_ok=True)
         # Optional cap on resolved entries. None disables rotation.
         self._max_entries = cfg.get("memory_log_max_entries")
 

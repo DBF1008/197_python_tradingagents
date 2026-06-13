@@ -28,6 +28,7 @@ from tradingagents.graph.analyst_execution import (
     get_initial_analyst_node,
     sync_analyst_tracker_from_chunk,
 )
+from tradingagents.storage import store_from_config
 from tradingagents.default_config import DEFAULT_CONFIG
 from cli.models import AnalystType
 from cli.utils import *
@@ -1033,13 +1034,13 @@ def run_analysis(checkpoint: bool = False):
     # Track start time for elapsed display
     start_time = time.time()
 
-    # Create result directory
-    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
-    results_dir.mkdir(parents=True, exist_ok=True)
-    report_dir = results_dir / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    log_file = results_dir / "message_tool.log"
+    # Create result directory via unified artifact store.
+    # This validates the ticker (closes path traversal vulnerability) and
+    # creates the per-ticker/per-date directory tree.
+    _store = store_from_config(config)
+    log_file = _store.message_log(selections["ticker"], selections["analysis_date"])
     log_file.touch(exist_ok=True)
+    report_dir = _store.report_dir(selections["ticker"], selections["analysis_date"])
 
     def save_message_decorator(obj, func_name):
         func = getattr(obj, func_name)
@@ -1266,7 +1267,7 @@ def run_analysis(checkpoint: bool = False):
     save_choice = typer.prompt("Save report?", default="Y").strip().upper()
     if save_choice in ("Y", "YES", ""):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_path = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
+        default_path = _store.save_report_dir(selections["ticker"], timestamp)
         save_path_str = typer.prompt(
             "Save path (press Enter for default)",
             default=str(default_path)
@@ -1299,8 +1300,9 @@ def analyze(
     ),
 ):
     if clear_checkpoints:
-        from tradingagents.graph.checkpointer import clear_all_checkpoints
-        n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
+        from tradingagents.storage import store_from_config as _sfc
+        _s = _sfc(DEFAULT_CONFIG)
+        n = _s.clear_all_checkpoints()
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     run_analysis(checkpoint=checkpoint)
 

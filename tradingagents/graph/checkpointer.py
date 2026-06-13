@@ -1,6 +1,11 @@
 """LangGraph checkpoint support for resumable analysis runs.
 
 Per-ticker SQLite databases so concurrent tickers don't contend.
+
+Path resolution delegates to :class:`~tradingagents.storage.ArtifactStore`
+when a *store* argument is provided; otherwise the legacy ``data_dir``
+parameter is used to build a minimal store internally, preserving full
+backward compatibility for callers that have not yet migrated.
 """
 
 from __future__ import annotations
@@ -9,20 +14,32 @@ import hashlib
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import TYPE_CHECKING, Generator
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from tradingagents.dataflows.utils import safe_ticker_component
 
+if TYPE_CHECKING:
+    from tradingagents.storage import ArtifactStore
 
-def _db_path(data_dir: str | Path, ticker: str) -> Path:
+
+def _resolve_store(
+    data_dir: str | Path | None,
+    store: ArtifactStore | None,
+) -> ArtifactStore:
+    """Return an ArtifactStore, preferring the explicit *store* argument."""
+    if store is not None:
+        return store
+    from tradingagents.storage import ArtifactStore
+
+    return ArtifactStore(data_cache_dir=data_dir)
+
+
+def _db_path(data_dir: str | Path, ticker: str, *, store: ArtifactStore | None = None) -> Path:
     """Return the SQLite checkpoint DB path for a ticker."""
-    # Reject ticker values that would escape the checkpoints directory.
-    safe = safe_ticker_component(ticker).upper()
-    p = Path(data_dir) / "checkpoints"
-    p.mkdir(parents=True, exist_ok=True)
-    return p / f"{safe}.db"
+    s = _resolve_store(data_dir, store)
+    return s.checkpoint_db(ticker)
 
 
 def thread_id(ticker: str, date: str) -> str:
@@ -31,9 +48,14 @@ def thread_id(ticker: str, date: str) -> str:
 
 
 @contextmanager
-def get_checkpointer(data_dir: str | Path, ticker: str) -> Generator[SqliteSaver, None, None]:
+def get_checkpointer(
+    data_dir: str | Path,
+    ticker: str,
+    *,
+    store: ArtifactStore | None = None,
+) -> Generator[SqliteSaver, None, None]:
     """Context manager yielding a SqliteSaver backed by a per-ticker DB."""
-    db = _db_path(data_dir, ticker)
+    db = _db_path(data_dir, ticker, store=store)
     conn = sqlite3.connect(str(db), check_same_thread=False)
     try:
         saver = SqliteSaver(conn)
@@ -43,18 +65,30 @@ def get_checkpointer(data_dir: str | Path, ticker: str) -> Generator[SqliteSaver
         conn.close()
 
 
-def has_checkpoint(data_dir: str | Path, ticker: str, date: str) -> bool:
+def has_checkpoint(
+    data_dir: str | Path,
+    ticker: str,
+    date: str,
+    *,
+    store: ArtifactStore | None = None,
+) -> bool:
     """Check whether a resumable checkpoint exists for ticker+date."""
-    return checkpoint_step(data_dir, ticker, date) is not None
+    return checkpoint_step(data_dir, ticker, date, store=store) is not None
 
 
-def checkpoint_step(data_dir: str | Path, ticker: str, date: str) -> int | None:
+def checkpoint_step(
+    data_dir: str | Path,
+    ticker: str,
+    date: str,
+    *,
+    store: ArtifactStore | None = None,
+) -> int | None:
     """Return the step number of the latest checkpoint, or None if none exists."""
-    db = _db_path(data_dir, ticker)
+    db = _db_path(data_dir, ticker, store=store)
     if not db.exists():
         return None
     tid = thread_id(ticker, date)
-    with get_checkpointer(data_dir, ticker) as saver:
+    with get_checkpointer(data_dir, ticker, store=store) as saver:
         config = {"configurable": {"thread_id": tid}}
         cp = saver.get_tuple(config)
         if cp is None:
@@ -62,20 +96,25 @@ def checkpoint_step(data_dir: str | Path, ticker: str, date: str) -> int | None:
         return cp.metadata.get("step")
 
 
-def clear_all_checkpoints(data_dir: str | Path) -> int:
+def clear_all_checkpoints(
+    data_dir: str | Path | None = None,
+    *,
+    store: ArtifactStore | None = None,
+) -> int:
     """Remove all checkpoint DBs. Returns number of files deleted."""
-    cp_dir = Path(data_dir) / "checkpoints"
-    if not cp_dir.exists():
-        return 0
-    dbs = list(cp_dir.glob("*.db"))
-    for db in dbs:
-        db.unlink()
-    return len(dbs)
+    s = _resolve_store(data_dir, store)
+    return s.clear_all_checkpoints()
 
 
-def clear_checkpoint(data_dir: str | Path, ticker: str, date: str) -> None:
+def clear_checkpoint(
+    data_dir: str | Path,
+    ticker: str,
+    date: str,
+    *,
+    store: ArtifactStore | None = None,
+) -> None:
     """Remove checkpoint for a specific ticker+date by deleting the thread's rows."""
-    db = _db_path(data_dir, ticker)
+    db = _db_path(data_dir, ticker, store=store)
     if not db.exists():
         return
     tid = thread_id(ticker, date)

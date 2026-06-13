@@ -8,7 +8,6 @@ from stockstats import wrap
 from typing import Annotated
 import os
 from .config import get_config
-from .utils import safe_ticker_component
 from .symbol_utils import normalize_symbol, NoMarketDataError
 
 logger = logging.getLogger(__name__)
@@ -69,26 +68,23 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     subsequent calls the cache is reused. Rows after curr_date are
     filtered out so backtests never see future prices.
     """
-    # Resolve broker/forex symbols (XAUUSD+ -> GC=F) to Yahoo's convention,
-    # then reject values that would escape the cache directory when
-    # interpolated into the cache filename (e.g. ``../../tmp/x``).
+    # Resolve broker/forex symbols (XAUUSD+ -> GC=F) to Yahoo's convention.
     canonical = normalize_symbol(symbol)
-    safe_symbol = safe_ticker_component(canonical)
 
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
 
-    # Cache uses a fixed window (15y to today) so one file per symbol
+    # Cache uses a fixed window (5y to today) so one file per symbol.
     today_date = pd.Timestamp.today()
     start_date = today_date - pd.DateOffset(years=5)
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = today_date.strftime("%Y-%m-%d")
 
-    os.makedirs(config["data_cache_dir"], exist_ok=True)
-    data_file = os.path.join(
-        config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
-    )
+    # Unified path policy — validates ticker safety + creates cache dir.
+    from tradingagents.storage import store_from_config
+
+    store = store_from_config(config)
+    data_file = str(store.ohlcv_cache(canonical, start_str, end_str))
 
     # A cached file may be empty if a prior fetch failed (unknown symbol,
     # transient rate limit). Treat an empty/columnless cache as a miss and

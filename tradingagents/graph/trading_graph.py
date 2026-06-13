@@ -1,8 +1,6 @@
 # TradingAgents/graph/trading_graph.py
 
 import logging
-import os
-from pathlib import Path
 import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, List, Optional
@@ -18,7 +16,7 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.storage import ArtifactStore, store_from_config
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -74,9 +72,9 @@ class TradingAgentsGraph:
         # Update the interface's config
         set_config(self.config)
 
-        # Create necessary directories
-        os.makedirs(self.config["data_cache_dir"], exist_ok=True)
-        os.makedirs(self.config["results_dir"], exist_ok=True)
+        # Unified artifact store — single source of truth for all runtime paths.
+        self._store: ArtifactStore = store_from_config(self.config)
+        self._store.ensure_base_dirs()
 
         # Initialize LLMs with provider-specific thinking configuration
         llm_kwargs = self._get_provider_kwargs()
@@ -101,7 +99,7 @@ class TradingAgentsGraph:
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
         
-        self.memory_log = TradingMemoryLog(self.config)
+        self.memory_log = TradingMemoryLog(self.config, store=self._store)
 
         # Create tool nodes
         self.tool_nodes = self._create_tool_nodes()
@@ -331,7 +329,8 @@ class TradingAgentsGraph:
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):
             self._checkpointer_ctx = get_checkpointer(
-                self.config["data_cache_dir"], company_name
+                self.config["data_cache_dir"], company_name,
+                store=self._store,
             )
             saver = self._checkpointer_ctx.__enter__()
             self.graph = self.workflow.compile(checkpointer=saver)
@@ -406,7 +405,8 @@ class TradingAgentsGraph:
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
             clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date)
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                store=self._store,
             )
 
         return final_state, self.process_signal(final_state["final_trade_decision"])
@@ -443,13 +443,9 @@ class TradingAgentsGraph:
             "final_trade_decision": final_state["final_trade_decision"],
         }
 
-        # Save to file. Reject ticker values that would escape the
-        # results directory when joined as a path component.
-        safe_ticker = safe_ticker_component(self.ticker)
-        directory = Path(self.config["results_dir"]) / safe_ticker / "TradingAgentsStrategy_logs"
-        directory.mkdir(parents=True, exist_ok=True)
-
-        log_path = directory / f"full_states_log_{trade_date}.json"
+        # Save to file via the unified artifact store, which validates
+        # the ticker and creates parent directories automatically.
+        log_path = self._store.state_log(self.ticker, trade_date)
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
 
