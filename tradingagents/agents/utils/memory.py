@@ -1,10 +1,10 @@
 """Append-only markdown decision log for TradingAgents."""
 
 from typing import List, Optional
-from pathlib import Path
 import re
 
 from tradingagents.agents.utils.rating import parse_rating
+from tradingagents.storage import ArtifactStore
 
 
 class TradingMemoryLog:
@@ -18,11 +18,10 @@ class TradingMemoryLog:
 
     def __init__(self, config: dict = None):
         cfg = config or {}
-        self._log_path = None
-        path = cfg.get("memory_log_path")
-        if path:
-            self._log_path = Path(path).expanduser()
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Resolve the log path (creating its parent dir) through the shared
+        # artifact policy; keep the store for the atomic-write temp sibling.
+        self._store = ArtifactStore.from_config(cfg)
+        self._log_path = self._store.memory_log_file(create=True)
         # Optional cap on resolved entries. None disables rotation.
         self._max_entries = cfg.get("memory_log_max_entries")
 
@@ -158,7 +157,7 @@ class TradingMemoryLog:
 
         new_blocks = self._apply_rotation(new_blocks)
         new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
+        tmp_path = self._store.memory_log_tmp_file()
         tmp_path.write_text(new_text, encoding="utf-8")
         tmp_path.replace(self._log_path)
 
@@ -212,7 +211,7 @@ class TradingMemoryLog:
 
         new_blocks = self._apply_rotation(new_blocks)
         new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
+        tmp_path = self._store.memory_log_tmp_file()
         tmp_path.write_text(new_text, encoding="utf-8")
         tmp_path.replace(self._log_path)
 

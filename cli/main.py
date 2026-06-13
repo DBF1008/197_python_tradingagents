@@ -29,6 +29,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.storage import ArtifactStore
 from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
@@ -1033,12 +1034,14 @@ def run_analysis(checkpoint: bool = False):
     # Track start time for elapsed display
     start_time = time.time()
 
-    # Create result directory
-    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
-    results_dir.mkdir(parents=True, exist_ok=True)
-    report_dir = results_dir / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    log_file = results_dir / "message_tool.log"
+    # Create the per-run artifact directory through the shared path policy.
+    # This validates the ticker (the raw value previously flowed straight into
+    # the path, letting a crafted ticker escape results_dir) and applies the
+    # same {ticker}/{date} layout used by the rest of the storage layer.
+    artifacts = ArtifactStore.from_config(config)
+    run_dir = artifacts.run_dir(selections["ticker"], selections["analysis_date"], create=True)
+    report_dir = artifacts.reports_dir(selections["ticker"], selections["analysis_date"], create=True)
+    log_file = artifacts.message_log(selections["ticker"], selections["analysis_date"])
     log_file.touch(exist_ok=True)
 
     def save_message_decorator(obj, func_name):
@@ -1266,7 +1269,10 @@ def run_analysis(checkpoint: bool = False):
     save_choice = typer.prompt("Save report?", default="Y").strip().upper()
     if save_choice in ("Y", "YES", ""):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_path = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
+        # Validate the ticker before interpolating it into the default export
+        # path (consistent with the in-tree run directory's safety check).
+        safe_ticker = ArtifactStore.safe_component(selections["ticker"])
+        default_path = Path.cwd() / "reports" / f"{safe_ticker}_{timestamp}"
         save_path_str = typer.prompt(
             "Save path (press Enter for default)",
             default=str(default_path)

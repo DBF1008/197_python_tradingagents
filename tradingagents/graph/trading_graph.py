@@ -1,8 +1,6 @@
 # TradingAgents/graph/trading_graph.py
 
 import logging
-import os
-from pathlib import Path
 import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, List, Optional
@@ -18,7 +16,7 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.storage import ArtifactStore
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -74,9 +72,10 @@ class TradingAgentsGraph:
         # Update the interface's config
         set_config(self.config)
 
-        # Create necessary directories
-        os.makedirs(self.config["data_cache_dir"], exist_ok=True)
-        os.makedirs(self.config["results_dir"], exist_ok=True)
+        # Unified artifact path policy; also creates the base cache/results dirs
+        # (replaces the per-directory os.makedirs calls).
+        self.artifacts = ArtifactStore.from_config(self.config)
+        self.artifacts.ensure_base_dirs()
 
         # Initialize LLMs with provider-specific thinking configuration
         llm_kwargs = self._get_provider_kwargs()
@@ -443,13 +442,9 @@ class TradingAgentsGraph:
             "final_trade_decision": final_state["final_trade_decision"],
         }
 
-        # Save to file. Reject ticker values that would escape the
-        # results directory when joined as a path component.
-        safe_ticker = safe_ticker_component(self.ticker)
-        directory = Path(self.config["results_dir"]) / safe_ticker / "TradingAgentsStrategy_logs"
-        directory.mkdir(parents=True, exist_ok=True)
-
-        log_path = directory / f"full_states_log_{trade_date}.json"
+        # Resolve + create the per-ticker state-log path through the shared
+        # artifact policy (validates the ticker, applies the directory layout).
+        log_path = self.artifacts.state_log_file(self.ticker, trade_date)
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
 
