@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
+from .registry import has_provider, openai_compatible_providers, get_provider
 from .validators import validate_model
 
 
@@ -148,23 +149,18 @@ _PASSTHROUGH_KWARGS = (
     "api_key", "callbacks", "http_client", "http_async_client",
 )
 
-# Provider base URLs. API-key env vars live in api_key_env.PROVIDER_API_KEY_ENV
-# (one canonical mapping consulted by both this client and the CLI's
-# interactive key-prompt). Dual-region providers (qwen/glm/minimax) keep
-# separate endpoints because international and China accounts cannot share
-# credentials (#758).
-_PROVIDER_BASE_URL = {
-    "xai":        "https://api.x.ai/v1",
-    "deepseek":   "https://api.deepseek.com",
-    "qwen":       "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-    "qwen-cn":    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "glm":        "https://api.z.ai/api/paas/v4/",
-    "glm-cn":     "https://open.bigmodel.cn/api/paas/v4/",
-    "minimax":    "https://api.minimax.io/v1",
-    "minimax-cn": "https://api.minimaxi.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "ollama":     "http://localhost:11434/v1",
-}
+# Provider base URLs are now sourced from the central registry
+# (registry.py). API-key env vars live in api_key_env.PROVIDER_API_KEY_ENV
+# (also derived from the registry). Dual-region providers (qwen/glm/minimax)
+# keep separate endpoints because international and China accounts cannot
+# share credentials (#758).
+from .registry import PROVIDERS as _REGISTRY_PROVIDERS
+
+# Set of provider keys that have a registry-defined base URL, used by
+# OpenAIClient.get_llm() to decide whether to set base_url on the LLM.
+_HAS_BASE_URL = frozenset(
+    k for k, v in _REGISTRY_PROVIDERS.items() if v.base_url is not None
+)
 
 
 def _resolve_provider_base_url(provider: str) -> Optional[str]:
@@ -175,12 +171,18 @@ def _resolve_provider_base_url(provider: str) -> Optional[str]:
     can point at a remote ollama-serve without editing code. The check is
     call-time, not import-time, so tests that monkeypatch the env after
     import behave correctly.
+
+    Returns ``None`` for unknown providers (matching the old dict.get
+    behavior) so callers can safely probe without catching exceptions.
     """
     if provider == "ollama":
         env_url = os.environ.get("OLLAMA_BASE_URL")
         if env_url:
             return env_url
-    return _PROVIDER_BASE_URL.get(provider)
+    try:
+        return get_provider(provider).base_url
+    except KeyError:
+        return None
 
 
 class OpenAIClient(BaseLLMClient):
@@ -210,7 +212,7 @@ class OpenAIClient(BaseLLMClient):
         # Provider-specific base URL and auth. An explicit base_url on the
         # client (e.g. a corporate proxy) takes precedence over the
         # provider default so users can route through their own gateway.
-        if self.provider in _PROVIDER_BASE_URL:
+        if self.provider in _HAS_BASE_URL:
             llm_kwargs["base_url"] = self.base_url or _resolve_provider_base_url(self.provider)
             api_key_env = get_api_key_env(self.provider)
             if api_key_env:

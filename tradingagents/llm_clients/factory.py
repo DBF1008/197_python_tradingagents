@@ -1,15 +1,12 @@
 from typing import Optional
 
 from .base_client import BaseLLMClient
+from .registry import openai_compatible_providers
 
-# Providers that use the OpenAI-compatible chat completions API
-_OPENAI_COMPATIBLE = (
-    "openai", "xai", "deepseek",
-    "qwen", "qwen-cn",
-    "glm", "glm-cn",
-    "minimax", "minimax-cn",
-    "ollama", "openrouter",
-)
+# Providers that use the OpenAI-compatible chat completions API —
+# derived from the central registry so adding a new provider only
+# requires editing registry.py.
+_OPENAI_COMPATIBLE = openai_compatible_providers()
 
 
 def create_llm_client(

@@ -73,74 +73,118 @@ _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
 }
 
 
+
+
+# OpenAI GPT family — uses native SDK default endpoint (no base_url override).
+_OPENAI_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),
+        ("GPT-5.4 Nano - Cheapest, high-volume tasks", "gpt-5.4-nano"),
+        ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
+        ("GPT-4.1 - Smartest non-reasoning model", "gpt-4.1"),
+    ],
+    "deep": [
+        ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
+        ("GPT-5.4 - Previous-gen frontier, 1M context, cost-effective", "gpt-5.4"),
+        ("GPT-5.2 - Strong reasoning, cost-effective", "gpt-5.2"),
+        ("GPT-5.5 Pro - Most capable, expensive ($30/$180 per 1M tokens)", "gpt-5.5-pro"),
+    ],
+}
+
+
+# Anthropic Claude family — uses native SDK default endpoint (no base_url override).
+_ANTHROPIC_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
+        ("Claude Haiku 4.5 - Fastest with near-frontier intelligence", "claude-haiku-4-5"),
+        ("Claude Sonnet 4.5 - High-performance for agents and coding", "claude-sonnet-4-5"),
+    ],
+    "deep": [
+        ("Claude Opus 4.8 - Latest frontier, agentic coding and reasoning", "claude-opus-4-8"),
+        ("Claude Opus 4.7 - Previous frontier, long-running agents", "claude-opus-4-7"),
+        ("Claude Opus 4.6 - Frontier intelligence, agents and coding", "claude-opus-4-6"),
+        ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
+    ],
+}
+
+
+# Google Gemini family — uses native SDK default endpoint (no base_url override).
+_GOOGLE_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("Gemini 3.5 Flash - Latest, frontier agentic + coding (GA)", "gemini-3.5-flash"),
+        ("Gemini 3.1 Flash Lite - Most cost-efficient (GA)", "gemini-3.1-flash-lite"),
+        ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
+        ("Gemini 2.5 Flash Lite - Fast, low-cost", "gemini-2.5-flash-lite"),
+    ],
+    "deep": [
+        ("Gemini 3.1 Pro - Reasoning-first, complex workflows (preview)", "gemini-3.1-pro-preview"),
+        ("Gemini 3.5 Flash - Latest GA, strong agentic + coding", "gemini-3.5-flash"),
+        ("Gemini 2.5 Pro - Stable pro model", "gemini-2.5-pro"),
+        ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
+    ],
+}
+
+
+# xAI Grok family — OpenAI-compatible via api.x.ai.
+_XAI_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("Grok 4.3 - Latest flagship, fast with built-in reasoning", "grok-4.3"),
+        ("Grok Build 0.1 - Coding-specialized, 256K ctx", "grok-build-0.1"),
+        ("Grok 4 Fast (Non-Reasoning) - Speed optimized", "grok-4-fast-non-reasoning"),
+    ],
+    "deep": [
+        ("Grok 4.3 - Latest flagship, built-in reasoning, 1M ctx", "grok-4.3"),
+        ("Grok 4.20 (Reasoning) - Previous-gen reasoning", "grok-4.20-0309-reasoning"),
+        ("Grok 4 Fast (Reasoning) - High-performance", "grok-4-fast-reasoning"),
+        ("Grok 4 - Flagship (dated build)", "grok-4-0709"),
+    ],
+}
+
+
+# DeepSeek — OpenAI-compatible via api.deepseek.com.
+# V4 thinking models reject tool_choice (official tool-calling guide);
+# deepseek-chat (V3.2 non-thinking) accepts it normally.
+_DEEPSEEK_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("DeepSeek V4 Flash - Latest V4 fast model", "deepseek-v4-flash"),
+        ("DeepSeek V3.2", "deepseek-chat"),
+        ("Custom model ID", "custom"),
+    ],
+    "deep": [
+        ("DeepSeek V4 Pro - Latest V4 flagship model", "deepseek-v4-pro"),
+        ("DeepSeek V3.2 (thinking)", "deepseek-reasoner"),
+        ("DeepSeek V3.2", "deepseek-chat"),
+        ("Custom model ID", "custom"),
+    ],
+}
+
+
+# Ollama — local runtime, any pulled model accepted. Display labels
+# intentionally omit a "local" marker since the endpoint is configurable
+# via OLLAMA_BASE_URL. "Custom model ID" lets users pick any model they
+# have pulled beyond the three suggested defaults.
+_OLLAMA_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("Qwen3:latest (8B)", "qwen3:latest"),
+        ("GPT-OSS:latest (20B)", "gpt-oss:latest"),
+        ("GLM-4.7-Flash:latest (30B)", "glm-4.7-flash:latest"),
+        ("Custom model ID", "custom"),
+    ],
+    "deep": [
+        ("GLM-4.7-Flash:latest (30B)", "glm-4.7-flash:latest"),
+        ("GPT-OSS:latest (20B)", "gpt-oss:latest"),
+        ("Qwen3:latest (8B)", "qwen3:latest"),
+        ("Custom model ID", "custom"),
+    ],
+}
+
+
 MODEL_OPTIONS: ProviderModeOptions = {
-    "openai": {
-        "quick": [
-            ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),
-            ("GPT-5.4 Nano - Cheapest, high-volume tasks", "gpt-5.4-nano"),
-            ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
-            ("GPT-4.1 - Smartest non-reasoning model", "gpt-4.1"),
-        ],
-        "deep": [
-            ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
-            ("GPT-5.4 - Previous-gen frontier, 1M context, cost-effective", "gpt-5.4"),
-            ("GPT-5.2 - Strong reasoning, cost-effective", "gpt-5.2"),
-            ("GPT-5.5 Pro - Most capable, expensive ($30/$180 per 1M tokens)", "gpt-5.5-pro"),
-        ],
-    },
-    "anthropic": {
-        "quick": [
-            ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
-            ("Claude Haiku 4.5 - Fastest with near-frontier intelligence", "claude-haiku-4-5"),
-            ("Claude Sonnet 4.5 - High-performance for agents and coding", "claude-sonnet-4-5"),
-        ],
-        "deep": [
-            ("Claude Opus 4.8 - Latest frontier, agentic coding and reasoning", "claude-opus-4-8"),
-            ("Claude Opus 4.7 - Previous frontier, long-running agents", "claude-opus-4-7"),
-            ("Claude Opus 4.6 - Frontier intelligence, agents and coding", "claude-opus-4-6"),
-            ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
-        ],
-    },
-    "google": {
-        "quick": [
-            ("Gemini 3.5 Flash - Latest, frontier agentic + coding (GA)", "gemini-3.5-flash"),
-            ("Gemini 3.1 Flash Lite - Most cost-efficient (GA)", "gemini-3.1-flash-lite"),
-            ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
-            ("Gemini 2.5 Flash Lite - Fast, low-cost", "gemini-2.5-flash-lite"),
-        ],
-        "deep": [
-            ("Gemini 3.1 Pro - Reasoning-first, complex workflows (preview)", "gemini-3.1-pro-preview"),
-            ("Gemini 3.5 Flash - Latest GA, strong agentic + coding", "gemini-3.5-flash"),
-            ("Gemini 2.5 Pro - Stable pro model", "gemini-2.5-pro"),
-            ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
-        ],
-    },
-    "xai": {
-        "quick": [
-            ("Grok 4.3 - Latest flagship, fast with built-in reasoning", "grok-4.3"),
-            ("Grok Build 0.1 - Coding-specialized, 256K ctx", "grok-build-0.1"),
-            ("Grok 4 Fast (Non-Reasoning) - Speed optimized", "grok-4-fast-non-reasoning"),
-        ],
-        "deep": [
-            ("Grok 4.3 - Latest flagship, built-in reasoning, 1M ctx", "grok-4.3"),
-            ("Grok 4.20 (Reasoning) - Previous-gen reasoning", "grok-4.20-0309-reasoning"),
-            ("Grok 4 Fast (Reasoning) - High-performance", "grok-4-fast-reasoning"),
-            ("Grok 4 - Flagship (dated build)", "grok-4-0709"),
-        ],
-    },
-    "deepseek": {
-        "quick": [
-            ("DeepSeek V4 Flash - Latest V4 fast model", "deepseek-v4-flash"),
-            ("DeepSeek V3.2", "deepseek-chat"),
-            ("Custom model ID", "custom"),
-        ],
-        "deep": [
-            ("DeepSeek V4 Pro - Latest V4 flagship model", "deepseek-v4-pro"),
-            ("DeepSeek V3.2 (thinking)", "deepseek-reasoner"),
-            ("DeepSeek V3.2", "deepseek-chat"),
-            ("Custom model ID", "custom"),
-        ],
-    },
+    "openai": _OPENAI_MODELS,
+    "anthropic": _ANTHROPIC_MODELS,
+    "google": _GOOGLE_MODELS,
+    "xai": _XAI_MODELS,
+    "deepseek": _DEEPSEEK_MODELS,
     # Qwen: same model IDs across global (dashscope-intl) and China
     # (dashscope) endpoints, so the two provider keys share one model list.
     "qwen": _QWEN_MODELS,
@@ -161,20 +205,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # cli.utils.confirm_ollama_endpoint() right after provider selection.
     # "Custom model ID" lets users pick any model they have pulled via
     # `ollama pull` beyond the three suggested defaults.
-    "ollama": {
-        "quick": [
-            ("Qwen3:latest (8B)", "qwen3:latest"),
-            ("GPT-OSS:latest (20B)", "gpt-oss:latest"),
-            ("GLM-4.7-Flash:latest (30B)", "glm-4.7-flash:latest"),
-            ("Custom model ID", "custom"),
-        ],
-        "deep": [
-            ("GLM-4.7-Flash:latest (30B)", "glm-4.7-flash:latest"),
-            ("GPT-OSS:latest (20B)", "gpt-oss:latest"),
-            ("Qwen3:latest (8B)", "qwen3:latest"),
-            ("Custom model ID", "custom"),
-        ],
-    },
+    "ollama": _OLLAMA_MODELS,
 }
 
 

@@ -9,6 +9,7 @@ from rich.console import Console
 from cli.models import AnalystType, AssetType
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.model_catalog import get_model_options
+from tradingagents.llm_clients.registry import PROVIDERS, get_provider
 
 console = Console()
 
@@ -271,35 +272,41 @@ def select_deep_thinking_agent(provider) -> str:
 def _llm_provider_table() -> list[tuple[str, str, str | None]]:
     """(display_name, provider_key, base_url) for every supported provider.
 
-    Shared by the interactive picker and by env-driven configuration so an
-    env-set provider resolves to the same default endpoint the menu uses.
+    Derived from the central registry so adding a new provider only requires
+    editing registry.py. Regional variants (qwen-cn, glm-cn, minimax-cn) are
+    excluded from the main dropdown — they are reached via secondary region
+    prompts (ask_qwen_region, etc.).
+
     Ollama users can point at a remote ollama-serve via OLLAMA_BASE_URL
     (convention from the broader Ollama ecosystem); falls back to the
     localhost default when unset.
     """
     ollama_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
-    return [
-        ("OpenAI", "openai", "https://api.openai.com/v1"),
-        ("Google", "google", None),
-        ("Anthropic", "anthropic", "https://api.anthropic.com/"),
-        ("xAI", "xai", "https://api.x.ai/v1"),
-        ("DeepSeek", "deepseek", "https://api.deepseek.com"),
-        ("Qwen", "qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
-        ("GLM", "glm", "https://open.bigmodel.cn/api/paas/v4/"),
-        ("MiniMax", "minimax", "https://api.minimax.io/v1"),
-        ("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
-        ("Azure OpenAI", "azure", None),
-        ("Ollama", "ollama", ollama_url),
-    ]
+    # Dropdown order matches the registry insertion order; regional
+    # variants are filtered out (handled by sub-prompts).
+    result = []
+    for key, pdef in PROVIDERS.items():
+        if key in ("qwen-cn", "glm-cn", "minimax-cn"):
+            continue  # reached via ask_*_region() sub-prompts
+        url = pdef.base_url
+        if key == "ollama":
+            url = ollama_url
+        result.append((pdef.display_name, key, url))
+    return result
 
 
 def provider_default_url(provider_key: str) -> str | None:
-    """Return the default backend URL for a provider key, or None if unknown."""
+    """Return the default backend URL for a provider key, or None if unknown.
+
+    Derived from the central registry. Ollama honours ``OLLAMA_BASE_URL``.
+    """
     key = provider_key.lower()
-    for _, pk, url in _llm_provider_table():
-        if pk == key:
-            return url
-    return None
+    if key == "ollama":
+        return os.environ.get("OLLAMA_BASE_URL") or get_provider("ollama").base_url
+    try:
+        return get_provider(key).base_url
+    except KeyError:
+        return None
 
 
 def select_llm_provider() -> tuple[str, str | None]:
@@ -395,17 +402,20 @@ def ask_glm_region() -> tuple[str, str]:
 
     Zhipu serves the same GLM models under two brands with separate
     accounts; keys aren't interchangeable. Returns (provider_key, backend_url).
+    URLs and env-var names sourced from the central registry.
     """
+    intl = get_provider("glm")
+    cn = get_provider("glm-cn")
     return questionary.select(
         "Select GLM platform:",
         choices=[
             questionary.Choice(
-                "Z.AI — api.z.ai (international, uses ZHIPU_API_KEY)",
-                value=("glm", "https://api.z.ai/api/paas/v4/"),
+                f"Z.AI — api.z.ai (international, uses {intl.api_key_env})",
+                value=("glm", intl.base_url),
             ),
             questionary.Choice(
-                "BigModel — open.bigmodel.cn (China, uses ZHIPU_CN_API_KEY)",
-                value=("glm-cn", "https://open.bigmodel.cn/api/paas/v4/"),
+                f"BigModel — open.bigmodel.cn (China, uses {cn.api_key_env})",
+                value=("glm-cn", cn.base_url),
             ),
         ],
         style=questionary.Style([
@@ -422,17 +432,20 @@ def ask_qwen_region() -> tuple[str, str]:
     Alibaba DashScope exposes two endpoints with separate accounts —
     a key from one region does NOT authenticate against the other
     (fixes #758). Returns (provider_key, backend_url).
+    URLs and env-var names sourced from the central registry.
     """
+    intl = get_provider("qwen")
+    cn = get_provider("qwen-cn")
     return questionary.select(
         "Select Qwen region:",
         choices=[
             questionary.Choice(
-                "International — dashscope-intl.aliyuncs.com (uses DASHSCOPE_API_KEY)",
-                value=("qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+                f"International — dashscope-intl.aliyuncs.com (uses {intl.api_key_env})",
+                value=("qwen", intl.base_url),
             ),
             questionary.Choice(
-                "China — dashscope.aliyuncs.com (uses DASHSCOPE_CN_API_KEY)",
-                value=("qwen-cn", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                f"China — dashscope.aliyuncs.com (uses {cn.api_key_env})",
+                value=("qwen-cn", cn.base_url),
             ),
         ],
         style=questionary.Style([
@@ -449,17 +462,20 @@ def ask_minimax_region() -> tuple[str, str]:
     MiniMax exposes two endpoints with separate accounts — a key from
     one region does NOT authenticate against the other. Returns
     (provider_key, backend_url).
+    URLs and env-var names sourced from the central registry.
     """
+    glb = get_provider("minimax")
+    cn = get_provider("minimax-cn")
     return questionary.select(
         "Select MiniMax region:",
         choices=[
             questionary.Choice(
-                "Global — api.minimax.io (uses MINIMAX_API_KEY)",
-                value=("minimax", "https://api.minimax.io/v1"),
+                f"Global — api.minimax.io (uses {glb.api_key_env})",
+                value=("minimax", glb.base_url),
             ),
             questionary.Choice(
-                "China — api.minimaxi.com (uses MINIMAX_CN_API_KEY)",
-                value=("minimax-cn", "https://api.minimaxi.com/v1"),
+                f"China — api.minimaxi.com (uses {cn.api_key_env})",
+                value=("minimax-cn", cn.base_url),
             ),
         ],
         style=questionary.Style([
