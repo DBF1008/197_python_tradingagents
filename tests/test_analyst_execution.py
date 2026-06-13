@@ -93,3 +93,160 @@ class AnalystWallTimeTrackerTests(unittest.TestCase):
             tracker.get_wall_times(),
             {"market": 3.0, "news": 5.0},
         )
+
+
+class ConcurrentAnalystTrackingTests(unittest.TestCase):
+    """Tests for sync_analyst_tracker_from_chunk with concurrency_limit > 1."""
+
+    def test_concurrent_start_marks_both_analysts(self):
+        """concurrency_limit=2, empty chunk → both analysts marked started."""
+        plan = build_analyst_execution_plan(["market", "news"], concurrency_limit=2)
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+
+        self.assertTrue(tracker.is_started("market"))
+        self.assertTrue(tracker.is_started("news"))
+        self.assertFalse(tracker.is_completed("market"))
+        self.assertFalse(tracker.is_completed("news"))
+        self.assertEqual(tracker.get_wall_times(), {})
+
+    def test_interleaved_completion(self):
+        """Two analysts start together, complete at different times."""
+        plan = build_analyst_execution_plan(["market", "news"], concurrency_limit=2)
+        tracker = AnalystWallTimeTracker(plan)
+
+        # t=10: both start (empty chunk, capacity=2)
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+
+        # t=15: news completes first
+        sync_analyst_tracker_from_chunk(
+            tracker, {"news_report": "done"}, now=15.0,
+        )
+        self.assertTrue(tracker.is_completed("news"))
+        self.assertFalse(tracker.is_completed("market"))
+        self.assertEqual(tracker.get_wall_times(), {"news": 5.0})
+
+        # t=20: market completes
+        sync_analyst_tracker_from_chunk(
+            tracker,
+            {"market_report": "done", "news_report": "done"},
+            now=20.0,
+        )
+        self.assertTrue(tracker.is_completed("market"))
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 10.0, "news": 5.0},
+        )
+
+    def test_repeated_chunk_preserves_earliest_start(self):
+        """Multiple empty chunks: setdefault preserves earliest start time."""
+        plan = build_analyst_execution_plan(["market", "news"], concurrency_limit=2)
+        tracker = AnalystWallTimeTracker(plan)
+
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        sync_analyst_tracker_from_chunk(tracker, {}, now=15.0)
+        sync_analyst_tracker_from_chunk(tracker, {}, now=20.0)
+
+        # Both should still show start time from first chunk (t=10)
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=25.0,
+        )
+        self.assertEqual(tracker.get_wall_times(), {"market": 15.0})
+
+    def test_serial_backward_compat(self):
+        """concurrency_limit=1 behaves identically to original serial logic."""
+        plan = build_analyst_execution_plan(["market", "news"], concurrency_limit=1)
+        tracker = AnalystWallTimeTracker(plan)
+
+        # t=10: only market starts (capacity=1)
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        self.assertTrue(tracker.is_started("market"))
+        self.assertFalse(tracker.is_started("news"))
+
+        # t=13: market completes
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=13.0,
+        )
+        self.assertEqual(tracker.get_wall_times(), {"market": 3.0})
+
+        # After market completes, news gets started using freed capacity
+        self.assertTrue(tracker.is_started("news"))
+
+        # t=18: news completes
+        sync_analyst_tracker_from_chunk(
+            tracker,
+            {"market_report": "done", "news_report": "done"},
+            now=18.0,
+        )
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 3.0, "news": 5.0},
+        )
+
+    def test_simultaneous_completion(self):
+        """Both reports in same chunk, concurrency_limit=2."""
+        plan = build_analyst_execution_plan(["market", "news"], concurrency_limit=2)
+        tracker = AnalystWallTimeTracker(plan)
+
+        # t=10: both start
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+
+        # t=13: both complete in same chunk
+        sync_analyst_tracker_from_chunk(
+            tracker,
+            {"market_report": "done", "news_report": "done"},
+            now=13.0,
+        )
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 3.0, "news": 3.0},
+        )
+
+    def test_capacity_reuse_after_completion(self):
+        """One finishes, freed slot used by next analyst in plan order."""
+        plan = build_analyst_execution_plan(
+            ["market", "news", "fundamentals"], concurrency_limit=2,
+        )
+        tracker = AnalystWallTimeTracker(plan)
+
+        # t=10: market and news start (capacity=2), fundamentals waits
+        sync_analyst_tracker_from_chunk(tracker, {}, now=10.0)
+        self.assertTrue(tracker.is_started("market"))
+        self.assertTrue(tracker.is_started("news"))
+        self.assertFalse(tracker.is_started("fundamentals"))
+
+        # t=15: market completes → capacity freed → fundamentals starts
+        sync_analyst_tracker_from_chunk(
+            tracker, {"market_report": "done"}, now=15.0,
+        )
+        self.assertTrue(tracker.is_completed("market"))
+        self.assertFalse(tracker.is_completed("news"))
+        self.assertTrue(tracker.is_started("fundamentals"))
+        self.assertEqual(tracker.get_wall_times(), {"market": 5.0})
+
+        # t=20: news completes
+        sync_analyst_tracker_from_chunk(
+            tracker,
+            {"market_report": "done", "news_report": "done"},
+            now=20.0,
+        )
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 5.0, "news": 10.0},
+        )
+
+        # t=25: fundamentals completes
+        sync_analyst_tracker_from_chunk(
+            tracker,
+            {
+                "market_report": "done",
+                "news_report": "done",
+                "fundamentals_report": "done",
+            },
+            now=25.0,
+        )
+        self.assertEqual(
+            tracker.get_wall_times(),
+            {"market": 5.0, "news": 10.0, "fundamentals": 10.0},
+        )

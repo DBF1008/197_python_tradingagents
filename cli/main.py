@@ -872,13 +872,15 @@ ANALYST_REPORT_MAP = {
 def update_analyst_statuses(message_buffer, chunk, wall_time_tracker=None):
     """Update analyst statuses based on accumulated report state.
 
-    Logic:
-    - Store new report content from the current chunk if present
-    - Check accumulated report_sections (not just current chunk) for status
-    - Analysts with reports = completed
+    When a wall_time_tracker is provided, analyst statuses are derived from
+    the tracker's state (which respects concurrency_limit for multiple
+    simultaneous in-progress analysts).
+
+    Without a tracker, falls back to serial logic:
     - First analyst without report = in_progress
     - Remaining analysts without reports = pending
-    - When all analysts done, set Bull Researcher to in_progress
+
+    When all analysts are done, set Bull Researcher to in_progress.
     """
     selected = message_buffer.selected_analysts
     found_active = False
@@ -897,16 +899,26 @@ def update_analyst_statuses(message_buffer, chunk, wall_time_tracker=None):
         if chunk.get(report_key):
             message_buffer.update_report_section(report_key, chunk[report_key])
 
-        # Determine status from accumulated sections, not just current chunk
-        has_report = bool(message_buffer.report_sections.get(report_key))
-
-        if has_report:
-            message_buffer.update_agent_status(agent_name, "completed")
-        elif not found_active:
-            message_buffer.update_agent_status(agent_name, "in_progress")
-            found_active = True
+        if wall_time_tracker is not None:
+            # Derive status from tracker — supports multiple in-progress
+            if wall_time_tracker.is_completed(analyst_key):
+                status = "completed"
+            elif wall_time_tracker.is_started(analyst_key):
+                status = "in_progress"
+                found_active = True
+            else:
+                status = "pending"
+            message_buffer.update_agent_status(agent_name, status)
         else:
-            message_buffer.update_agent_status(agent_name, "pending")
+            # Serial fallback: use accumulated report sections
+            has_report = bool(message_buffer.report_sections.get(report_key))
+            if has_report:
+                message_buffer.update_agent_status(agent_name, "completed")
+            elif not found_active:
+                message_buffer.update_agent_status(agent_name, "in_progress")
+                found_active = True
+            else:
+                message_buffer.update_agent_status(agent_name, "pending")
 
     # When all analysts complete, transition research team to in_progress
     if not found_active and selected:

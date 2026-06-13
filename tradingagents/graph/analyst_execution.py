@@ -107,6 +107,12 @@ class AnalystWallTimeTracker:
     def get_wall_times(self) -> Dict[str, float]:
         return dict(self._wall_times)
 
+    def is_started(self, analyst_key: str) -> bool:
+        return analyst_key in self._started_at
+
+    def is_completed(self, analyst_key: str) -> bool:
+        return analyst_key in self._wall_times
+
     def format_summary(self) -> str:
         parts = []
         for spec in self.plan.specs:
@@ -125,16 +131,32 @@ def sync_analyst_tracker_from_chunk(
     now: Optional[float] = None,
 ) -> None:
     current_time = monotonic() if now is None else now
-    active_found = False
 
+    # 1. Mark all specs whose report appears in this chunk as started.
+    #    setdefault inside mark_started is idempotent — only the earliest
+    #    timestamp is kept, so repeated chunks never overwrite a prior start.
     for spec in tracker.plan.specs:
-        has_report = bool(chunk.get(spec.report_key))
-
-        if has_report:
+        if chunk.get(spec.report_key):
             tracker.mark_started(spec.key, started_at=current_time)
+
+    # 2. Process completions BEFORE computing capacity, so that analysts
+    #    finishing in this chunk free their slot for the next pending one.
+    #    mark_completed is idempotent (no-op if already recorded).
+    for spec in tracker.plan.specs:
+        if chunk.get(spec.report_key):
             tracker.mark_completed(spec.key, completed_at=current_time)
-            continue
 
-        if not active_found:
+    # 3. How many analysts are still in-flight (started but not completed)?
+    active_count = sum(
+        1 for spec in tracker.plan.specs
+        if tracker.is_started(spec.key) and not tracker.is_completed(spec.key)
+    )
+    available_capacity = tracker.plan.concurrency_limit - active_count
+
+    # 4. Fill available capacity with the next pending analysts (plan order).
+    for spec in tracker.plan.specs:
+        if available_capacity <= 0:
+            break
+        if not tracker.is_started(spec.key):
             tracker.mark_started(spec.key, started_at=current_time)
-            active_found = True
+            available_capacity -= 1
